@@ -1285,3 +1285,103 @@ class QualityGateFalsePositiveTests(TestCase):
         report = self._check("Here is the email you requested: we admire Acme Corp.")
         self.assertFalse(report.passed)
         self.assertIn("ai_meta_commentary", report.codes)
+
+
+class QualityGateRemainingDetectorTests(TestCase):
+    """
+    Coverage for the checks that had no direct assertion.
+
+    They were all verified to fire correctly, but an untested check is
+    indistinguishable from a dead one to anyone reading the code, so each
+    is pinned here.
+    """
+
+    CTX = {
+        "company": "Acme Corp",
+        "contact_person": "Jordan Lee",
+        "sender_name": "Asha Rao",
+    }
+
+    FALLBACK = (
+        "Respected Sir,\n\n"
+        "I am Asha Rao, Outreach Lead at 180 Degrees Consulting, IIT Kharagpur, "
+        "a student-run consultancy providing strategic and operational services "
+        "to organisations aiming for greater impact. We have partnered with the "
+        "CRY Foundation and Robin Hood Army on operational strategy, user "
+        "engagement, and program scalability.\n\n"
+        "We would love to explore how our data-driven consulting could support "
+        "Acme Corp goals. Could we schedule a brief call to discuss this?\n\n"
+        "Best regards,\nAsha Rao\nOutreach Lead\n"
+        "180 Degrees Consulting, IIT Kharagpur\n"
+    )
+
+    def test_ai_output_identical_to_the_fallback_is_flagged(self):
+        report = quality.check_email(
+            "180DC IIT Kharagpur X Acme Corp",
+            self.FALLBACK,
+            fallback_body=self.FALLBACK,
+            **self.CTX,
+        )
+        self.assertIn("generic_fallback_clone", report.codes)
+
+    def test_trivially_reworded_fallback_is_still_flagged(self):
+        report = quality.check_email(
+            "180DC IIT Kharagpur X Acme Corp",
+            self.FALLBACK.replace("brief call", "quick call"),
+            fallback_body=self.FALLBACK,
+            **self.CTX,
+        )
+        self.assertIn("generic_fallback_clone", report.codes)
+
+    def test_genuinely_personalised_body_is_not_flagged_as_a_clone(self):
+        personalised = self.FALLBACK.replace(
+            "data-driven consulting could support Acme Corp goals",
+            "team could help Acme Corp cut warehouse turnaround times after "
+            "your Pune facility opening",
+        )
+        report = quality.check_email(
+            "180DC IIT Kharagpur X Acme Corp",
+            personalised,
+            fallback_body=self.FALLBACK,
+            **self.CTX,
+        )
+        self.assertNotIn("generic_fallback_clone", report.codes)
+
+    def test_markdown_surviving_into_the_body_is_flagged(self):
+        body = "Respected Mr Lee,\n\n" + "**Acme Corp** is great. " * 20 + "\nAsha Rao"
+        report = quality.check_email("180DC X Acme Corp", body, **self.CTX)
+        self.assertIn("markdown_artifact", report.codes)
+
+    def test_overlong_subject_is_flagged(self):
+        body = (
+            "Respected Mr Lee,\n\nAcme Corp is great and we would love to work "
+            "with you on something meaningful this year across operations. " * 3
+            + "\nAsha Rao"
+        )
+        report = quality.check_email("180DC " + "x" * 200, body, **self.CTX)
+        self.assertIn("subject_too_long", report.codes)
+
+    def test_subject_line_repeated_inside_the_body_is_flagged(self):
+        body = (
+            "Subject: 180DC IIT Kharagpur X Acme Corp\n\n"
+            "Respected Mr Lee,\n\nWe admire Acme Corp work in logistics and "
+            "would value a conversation about how we could support your team "
+            "over the coming months across operations.\n\nAsha Rao\n"
+        )
+        report = quality.check_email("180DC X Acme Corp", body, **self.CTX)
+        self.assertIn("subject_in_body", report.codes)
+
+    def test_missing_greeting_is_flagged_as_a_warning_only(self):
+        # Long enough to clear the 200-char minimum, so missing_greeting is
+        # the only thing wrong with it — otherwise body_too_short would fire
+        # too and mask what this test is actually asserting.
+        body = (
+            "We admire Acme Corp work in logistics and would value a "
+            "conversation about how we could support your team over the "
+            "coming months across your operations, particularly around "
+            "warehouse throughput and last-mile routing where our student "
+            "teams have delivered measurable gains elsewhere.\n\nAsha Rao\n"
+        )
+        report = quality.check_email("180DC X Acme Corp", body, **self.CTX)
+        self.assertIn("missing_greeting", report.codes)
+        self.assertTrue(report.passed, report.summary())
