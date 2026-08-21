@@ -1201,3 +1201,87 @@ class ReliabilityDashboardTests(TestCase):
 
         response = self.client.get(reverse("outreach:reliability_dashboard"))
         self.assertEqual(response.status_code, 302)
+
+
+class QualityGateFalsePositiveTests(TestCase):
+    """
+    Emails that are perfectly fine and must NOT be blocked.
+
+    A gate that rejects good emails is worse than no gate: it silently
+    downgrades well-personalised outreach to the generic template while
+    reporting itself as working. Each case here was a real false positive
+    found by probing the detectors, and is pinned so it cannot come back.
+    """
+
+    BASE = (
+        "Respected Mr Lee,\n\n"
+        "I am Asha Rao, Outreach Lead at 180 Degrees Consulting, IIT Kharagpur, "
+        "a student-run consultancy providing strategic and operational services "
+        "to organisations aiming for greater impact and efficiency. {frag}\n\n"
+        "We would welcome a brief conversation about how we could support "
+        "Acme Corp this year.\n\n"
+        "Best regards,\n"
+        "Asha Rao\n"
+        "Outreach Lead\n"
+        "180 Degrees Consulting, IIT Kharagpur\n"
+    )
+
+    def _check(self, fragment, body_override=None):
+        body = body_override or self.BASE.format(frag=fragment)
+        return quality.check_email(
+            "180DC IIT Kharagpur X Acme Corp",
+            body,
+            company="Acme Corp",
+            contact_person="Jordan Lee",
+            sender_name="Asha Rao",
+        )
+
+    def test_email_address_in_angle_brackets_is_not_a_placeholder(self):
+        report = self._check("You can reach me directly at <asha.rao@180dc.org>.")
+        self.assertTrue(report.passed, report.summary())
+        self.assertNotIn("unfilled_placeholder", report.codes)
+
+    def test_url_in_angle_brackets_is_not_a_placeholder(self):
+        report = self._check("Our work is at <https://180dc.org/branches/IITKGP>.")
+        self.assertTrue(report.passed, report.summary())
+
+    def test_prospects_own_version_number_is_not_ai_commentary(self):
+        """
+        'your version 2 rollout' is exactly the kind of recent news the
+        research step surfaces — it must not read as the model addressing
+        the operator.
+        """
+        report = self._check("We were impressed by Acme Corp version 2 rollout.")
+        self.assertTrue(report.passed, report.summary())
+        self.assertNotIn("ai_meta_commentary", report.codes)
+
+    def test_signing_with_first_name_only_counts_as_signed(self):
+        body = self.BASE.format(frag="We admire Acme Corp work.").replace(
+            "Asha Rao", "Asha"
+        )
+        report = self._check("", body_override=body)
+        self.assertTrue(report.passed, report.summary())
+        self.assertNotIn("missing_signature", report.codes)
+
+    def test_signing_with_surname_only_counts_as_signed(self):
+        body = self.BASE.format(frag="We admire Acme Corp work.").replace(
+            "Asha Rao", "Rao"
+        )
+        report = self._check("", body_override=body)
+        self.assertNotIn("missing_signature", report.codes)
+
+    def test_real_placeholders_are_still_blocked(self):
+        """The fixes above must not have opened a hole in the main check."""
+        for fragment in (
+            "We admire [Company] work in [specific domain].",
+            "We admire <company name> work in logistics.",
+        ):
+            with self.subTest(fragment=fragment):
+                report = self._check(fragment)
+                self.assertFalse(report.passed)
+                self.assertIn("unfilled_placeholder", report.codes)
+
+    def test_real_assistant_commentary_is_still_blocked(self):
+        report = self._check("Here is the email you requested: we admire Acme Corp.")
+        self.assertFalse(report.passed)
+        self.assertIn("ai_meta_commentary", report.codes)

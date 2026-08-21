@@ -114,7 +114,11 @@ class QualityReport:
 _SQUARE_PLACEHOLDER_RE = re.compile(r"\[[^\]\n]{2,80}\]")
 
 # Angle-bracket slots: "<company name>", "<your name>".
-_ANGLE_PLACEHOLDER_RE = re.compile(r"<[a-zA-Z][^>\n]{1,60}>")
+# Deliberately excludes anything containing "@" or "://" — a signature that
+# writes an address as <asha.rao@180dc.org> or a link as <https://...> is
+# ordinary email convention, not an unfilled slot, and blocking it would
+# reject a perfectly good email.
+_ANGLE_PLACEHOLDER_RE = re.compile(r"<(?![^>\n]*(?:@|://))[a-zA-Z][^>\n]{1,60}>")
 
 # Django/Jinja-style tokens leaking out of an OutreachCampaign.email_template
 # that was pasted into the prompt as campaign guidance and echoed back.
@@ -130,7 +134,13 @@ _META_PATTERNS = [
     r"\bfeel free to (?:adjust|modify|tweak)\b",
     r"\bbelow is (?:the|a) (?:email|draft)\b",
     r"^\s*(?:certainly|sure|of course)[!,.]",
-    r"\b(?:draft|version) \d\b",
+    # NOTE: an earlier version matched a bare "draft 2" / "version 3" here.
+    # That was removed: a prospect's own product launch ("your version 2
+    # rollout") is exactly the kind of recent news the research step
+    # surfaces, and blocking it rejected a well-personalised email. Only
+    # phrasings that address the operator rather than the prospect belong
+    # in this list.
+    r"\bhere(?:'s| is) (?:draft|version) \d\b",
 ]
 _META_RE = re.compile("|".join(_META_PATTERNS), re.IGNORECASE | re.MULTILINE)
 
@@ -284,7 +294,7 @@ def check_email(
         )
 
     # -- structure the prompt explicitly demanded ---------------------------
-    if sender_name and sender_name.lower() not in body_lower:
+    if sender_name and not _signed_by(body_lower, sender_name):
         add(
             "missing_signature",
             BLOCKER,
@@ -335,6 +345,22 @@ def check_email(
     deduction = sum(_WEIGHTS.get(i.code, 5) for i in report.issues)
     report.score = max(0, 100 - deduction)
     return report
+
+
+def _signed_by(body_lower: str, sender_name: str) -> bool:
+    """
+    Is the email signed by this sender?
+
+    Matches any distinctive part of the name, not the full string. People
+    routinely sign with their first name alone ("Asha") while the profile
+    holds "Asha Rao" — requiring the exact full name rejected a correctly
+    signed email, which is a worse failure than the one this check exists
+    to catch.
+    """
+    parts = [p for p in re.sub(r"[^\w\s]", " ", sender_name.lower()).split() if len(p) >= 3]
+    if not parts:
+        return True  # nothing distinctive to look for — don't invent a defect
+    return any(p in body_lower for p in parts)
 
 
 def _near_identical(a: str, b: str, threshold: float = 0.9) -> bool:
